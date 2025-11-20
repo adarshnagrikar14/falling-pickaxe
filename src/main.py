@@ -2,7 +2,7 @@ import time
 import pygame
 import pymunk
 import pymunk.pygame_util
-from youtube import get_live_stream, get_new_live_chat_messages, get_live_chat_id, get_subscriber_count, validate_live_stream_id
+from youtube import get_live_stream, get_new_live_chat_messages, get_live_chat_id, get_subscriber_count, validate_live_stream_id, find_active_stream, get_my_channel_id
 from config import config
 from atlas import create_texture_atlas
 from pathlib import Path
@@ -28,9 +28,42 @@ subscribers = None
 
 if config["CHAT_CONTROL"] == True:
     print("Checking for specific live stream")
+    stream_id = None
     if config["LIVESTREAM_ID"] is not None and config["LIVESTREAM_ID"] != "":
         stream_id = validate_live_stream_id(config["LIVESTREAM_ID"])
         live_stream = get_live_stream(stream_id)
+    
+    # If not found in config, try to find active stream on channel
+    if live_stream is None:
+         channel_id = config["CHANNEL_ID"]
+         # Check if channel_id is default or empty
+         if not channel_id or channel_id == "YOUR_CHANNEL_ID_HERE":
+             print("Configured CHANNEL_ID is missing or default. Attempting to fetch from authenticated user...")
+             channel_id = get_my_channel_id()
+             if channel_id:
+                 print(f"Using authenticated channel ID: {channel_id}")
+                 config["CHANNEL_ID"] = channel_id # Update config for later use
+         
+         if channel_id:
+             print(f"Searching for active live stream on channel {channel_id}...")
+             stream_id = find_active_stream(channel_id)
+             if stream_id:
+                 print(f"Found active stream: {stream_id}")
+                 live_stream = get_live_stream(stream_id)
+
+    # If still not found, ask user
+    if live_stream is None:
+        print("No live stream found via config or automatic search.")
+        # Only ask if running in a terminal where input is possible/visible
+        print("If you have a stream ID, you can enter it now.")
+        try:
+            inp = input("Enter YouTube Video ID (or press Enter to skip): ").strip()
+            if inp:
+                stream_id = validate_live_stream_id(inp)
+                if stream_id:
+                    live_stream = get_live_stream(stream_id)
+        except EOFError:
+            pass
 
     if live_stream is None:
         print("No specific live stream found. App will run without it.")
@@ -40,7 +73,10 @@ if config["CHAT_CONTROL"] == True:
     # get chat id from live stream
     if live_stream is not None:
         print("Fetching live chat ID...")
-        live_chat_id = get_live_chat_id(live_stream["id"])
+        if "liveStreamingDetails" in live_stream and "activeLiveChatId" in live_stream["liveStreamingDetails"]:
+             live_chat_id = live_stream["liveStreamingDetails"]["activeLiveChatId"]
+        else:
+             live_chat_id = get_live_chat_id(live_stream["id"])
 
     if live_chat_id is None:
         print("No live chat ID found. App will run without it.")

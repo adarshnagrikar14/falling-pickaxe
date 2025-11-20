@@ -184,3 +184,6 @@ logs/*
 
 # User-specific files
 .vs
+
+client_secret.json
+token.json
