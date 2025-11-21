@@ -187,3 +187,5 @@ logs/*
 
 client_secret.json
 token.json
+
+.buildozer

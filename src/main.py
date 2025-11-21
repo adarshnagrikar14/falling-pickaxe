@@ -27,29 +27,50 @@ live_chat_id = None
 subscribers = None
 
 if config["CHAT_CONTROL"] == True:
-    print("Checking for specific live stream")
+    print("=" * 60)
+    print("YOUTUBE INTEGRATION ENABLED - Initializing OAuth")
+    print("=" * 60)
+    
+    # Explicitly initialize YouTube service
+    try:
+        from youtube import ensure_youtube_service
+        ensure_youtube_service()
+        print("[SUCCESS] YouTube API initialized!")
+    except Exception as e:
+        print(f"[FATAL] Failed to initialize YouTube API: {e}")
+        print("Make sure you have:")
+        print("  1. client_secret.json in project root")
+        print("  2. token.json (or run auth flow)")
+        print("  3. Valid CHANNEL_ID in config.json")
+        config["CHAT_CONTROL"] = False
+    
+    if config["CHAT_CONTROL"]:
+        print("\nChecking for specific live stream")
     stream_id = None
     if config["LIVESTREAM_ID"] is not None and config["LIVESTREAM_ID"] != "":
         stream_id = validate_live_stream_id(config["LIVESTREAM_ID"])
         live_stream = get_live_stream(stream_id)
-    
+
     # If not found in config, try to find active stream on channel
     if live_stream is None:
-         channel_id = config["CHANNEL_ID"]
-         # Check if channel_id is default or empty
-         if not channel_id or channel_id == "YOUR_CHANNEL_ID_HERE":
-             print("Configured CHANNEL_ID is missing or default. Attempting to fetch from authenticated user...")
-             channel_id = get_my_channel_id()
-             if channel_id:
-                 print(f"Using authenticated channel ID: {channel_id}")
-                 config["CHANNEL_ID"] = channel_id # Update config for later use
-         
-         if channel_id:
-             print(f"Searching for active live stream on channel {channel_id}...")
-             stream_id = find_active_stream(channel_id)
-             if stream_id:
-                 print(f"Found active stream: {stream_id}")
-                 live_stream = get_live_stream(stream_id)
+        channel_id = config["CHANNEL_ID"]
+        # Check if channel_id is default or empty
+        if not channel_id or channel_id == "YOUR_CHANNEL_ID_HERE":
+            print(
+                "Configured CHANNEL_ID is missing or default. Attempting to fetch from authenticated user...")
+            channel_id = get_my_channel_id()
+            if channel_id:
+                print(f"Using authenticated channel ID: {channel_id}")
+                # Update config for later use
+                config["CHANNEL_ID"] = channel_id
+
+        if channel_id:
+            print(
+                f"Searching for active live stream on channel {channel_id}...")
+            stream_id = find_active_stream(channel_id)
+            if stream_id:
+                print(f"Found active stream: {stream_id}")
+                live_stream = get_live_stream(stream_id)
 
     # If still not found, ask user
     if live_stream is None:
@@ -57,7 +78,8 @@ if config["CHAT_CONTROL"] == True:
         # Only ask if running in a terminal where input is possible/visible
         print("If you have a stream ID, you can enter it now.")
         try:
-            inp = input("Enter YouTube Video ID (or press Enter to skip): ").strip()
+            inp = input(
+                "Enter YouTube Video ID (or press Enter to skip): ").strip()
             if inp:
                 stream_id = validate_live_stream_id(inp)
                 if stream_id:
@@ -74,9 +96,9 @@ if config["CHAT_CONTROL"] == True:
     if live_stream is not None:
         print("Fetching live chat ID...")
         if "liveStreamingDetails" in live_stream and "activeLiveChatId" in live_stream["liveStreamingDetails"]:
-             live_chat_id = live_stream["liveStreamingDetails"]["activeLiveChatId"]
+            live_chat_id = live_stream["liveStreamingDetails"]["activeLiveChatId"]
         else:
-             live_chat_id = get_live_chat_id(live_stream["id"])
+            live_chat_id = get_live_chat_id(live_stream["id"])
 
     if live_chat_id is None:
         print("No live chat ID found. App will run without it.")
@@ -84,7 +106,7 @@ if config["CHAT_CONTROL"] == True:
         print("Live chat ID found:", live_chat_id)
 
     # get subscribers count
-    if(config["CHANNEL_ID"] is not None and config["CHANNEL_ID"] != ""):
+    if (config["CHANNEL_ID"] is not None and config["CHANNEL_ID"] != ""):
         print("Fetching subscribers count...")
         subscribers = get_subscriber_count(config["CHANNEL_ID"])
 
@@ -93,7 +115,9 @@ if config["CHAT_CONTROL"] == True:
     else:
         print("Subscribers count found:", subscribers)
 
-# Queues for chat
+# Queues for chat - Thread-safe using threading.Lock
+chat_lock = threading.Lock()
+
 tnt_queue = []
 tnt_superchat_queue = []
 fast_slow_queue = []
@@ -101,85 +125,107 @@ big_queue = []
 pickaxe_queue = []
 mega_tnt_queue = []
 
-async def handle_youtube_poll():
-    global subscribers # Use global to modify the variable
 
-    if subscribers is not None:
-        new_subscribers = get_subscriber_count(config["CHANNEL_ID"])
-        if new_subscribers is not None and new_subscribers > subscribers:
-            mega_tnt_queue.append("New Subscriber") # Add to mega tnt queue
-            subscribers = new_subscribers # Update subscriber count
+async def poll_youtube_chat():
+    """Poll YouTube chat messages and populate queues."""
+    try:
+        new_messages = get_new_live_chat_messages(live_chat_id)
 
-    new_messages = get_new_live_chat_messages(live_chat_id)
+        for message in new_messages:
+            author = message["author"]
+            text = message["message"]
+            is_superchat = message["sc_details"] is not None
+            is_supersticker = message["ss_details"] is not None
 
-    for message in new_messages:
-        author = message["author"]
-        text = message["message"]
-        is_superchat = message["sc_details"] is not None
-        is_supersticker = message["ss_details"] is not None
+            text_lower = text.lower()
 
-        text_lower = text.lower()
+            # Use lock when modifying queues from async thread
+            with chat_lock:
+                # Check for "tnt" command (add author to regular tnt_queue) - Only English "tnt"
+                if "tnt" in text_lower:
+                    if author not in tnt_queue:
+                        tnt_queue.append(author)
+                        print(f"[CHAT] Added {author} to regular TNT queue")
 
-        # Check for "tnt" command (add author to regular tnt_queue) - Only English "tnt"
-        if "tnt" in text_lower:
-            if author not in tnt_queue:
-                tnt_queue.append(author)
-                print(f"Added {author} to regular TNT queue")
+                # Check for Superchat/Supersticker (add to superchat tnt queue)
+                if is_superchat or is_supersticker:
+                    if author not in [entry[0] for entry in tnt_superchat_queue]:
+                        tnt_superchat_queue.append((author, text))
+                        print(f"[CHAT] Added {author} to Superchat TNT queue")
 
-        # Check for Superchat/Supersticker (add to superchat tnt queue)
-        if is_superchat or is_supersticker:
-            if author not in [entry[0] for entry in tnt_superchat_queue]:
-                 tnt_superchat_queue.append((author, text))
-                 print(f"Added {author} to Superchat TNT queue")
+                if "fast" in text.lower() and author not in [entry[0] for entry in fast_slow_queue]:
+                    fast_slow_queue.append((author, "Fast"))
+                    print(f"[CHAT] Added {author} to Fast/Slow queue (Fast)")
+                elif "slow" in text.lower() and author not in [entry[0] for entry in fast_slow_queue]:
+                    fast_slow_queue.append((author, "Slow"))
+                    print(f"[CHAT] Added {author} to Fast/Slow queue (Slow)")
 
-        if "fast" in text.lower() and author not in [entry[0] for entry in fast_slow_queue]:
-            fast_slow_queue.append((author, "Fast"))
-            print(f"Added {author} to Fast/Slow queue (Fast)")
-        elif "slow" in text.lower() and author not in [entry[0] for entry in fast_slow_queue]:
-            fast_slow_queue.append((author, "Slow"))
-            print(f"Added {author} to Fast/Slow queue (Slow)")
+                if "big" in text.lower() and author not in big_queue:
+                    big_queue.append(author)
+                    print(f"[CHAT] Added {author} to Big queue")
 
-        if "big" in text.lower() and author not in big_queue:
-            big_queue.append(author)
-            print(f"Added {author} to Big queue")
+                # Check for pickaxe commands (add author and pickaxe type to pickaxe_queue)
+                if "wood" in text_lower:
+                    if author not in [entry[0] for entry in pickaxe_queue]:
+                        pickaxe_queue.append((author, "wooden_pickaxe"))
+                        print(
+                            f"[CHAT] Added {author} to Pickaxe queue (wooden_pickaxe)")
+                elif "stone" in text_lower:
+                    if author not in [entry[0] for entry in pickaxe_queue]:
+                        pickaxe_queue.append((author, "stone_pickaxe"))
+                        print(
+                            f"[CHAT] Added {author} to Pickaxe queue (stone_pickaxe)")
+                elif "iron" in text_lower:
+                    if author not in [entry[0] for entry in pickaxe_queue]:
+                        pickaxe_queue.append((author, "iron_pickaxe"))
+                        print(
+                            f"[CHAT] Added {author} to Pickaxe queue (iron_pickaxe)")
+                elif "gold" in text_lower:
+                    if author not in [entry[0] for entry in pickaxe_queue]:
+                        pickaxe_queue.append((author, "golden_pickaxe"))
+                        print(
+                            f"[CHAT] Added {author} to Pickaxe queue (golden_pickaxe)")
+                elif "diamond" in text_lower:
+                    if author not in [entry[0] for entry in pickaxe_queue]:
+                        pickaxe_queue.append((author, "diamond_pickaxe"))
+                        print(
+                            f"[CHAT] Added {author} to Pickaxe queue (diamond_pickaxe)")
+                elif "netherite" in text_lower:
+                    if author not in [entry[0] for entry in pickaxe_queue]:
+                        pickaxe_queue.append((author, "netherite_pickaxe"))
+                        print(
+                            f"[CHAT] Added {author} to Pickaxe queue (netherite_pickaxe)")
+    except Exception as e:
+        print(f"[ERROR] Chat polling failed: {e}")
 
-        # Check for pickaxe commands (add author and pickaxe type to pickaxe_queue)
-        if "wood" in text_lower:
-             if author not in [entry[0] for entry in pickaxe_queue]:
-                 pickaxe_queue.append((author, "wooden_pickaxe"))
-                 print(f"Added {author} to Pickaxe queue (wooden_pickaxe)")
-        elif "stone" in text_lower:
-             if author not in [entry[0] for entry in pickaxe_queue]:
-                 pickaxe_queue.append((author, "stone_pickaxe"))
-                 print(f"Added {author} to Pickaxe queue (stone_pickaxe)")
-        elif "iron" in text_lower:
-             if author not in [entry[0] for entry in pickaxe_queue]:
-                 pickaxe_queue.append((author, "iron_pickaxe"))
-                 print(f"Added {author} to Pickaxe queue (iron_pickaxe)")
-        elif "gold" in text_lower:
-             if author not in [entry[0] for entry in pickaxe_queue]:
-                 pickaxe_queue.append((author, "golden_pickaxe"))
-                 print(f"Added {author} to Pickaxe queue (golden_pickaxe)")
-        elif "diamond" in text_lower:
-             if author not in [entry[0] for entry in pickaxe_queue]:
-                 pickaxe_queue.append((author, "diamond_pickaxe"))
-                 print(f"Added {author} to Pickaxe queue (diamond_pickaxe)")
-        elif "netherite" in text_lower:
-             if author not in [entry[0] for entry in pickaxe_queue]:
-                 pickaxe_queue.append((author, "netherite_pickaxe"))
-                 print(f"Added {author} to Pickaxe queue (netherite_pickaxe)")
 
-    # print the queue counts (optional, for debugging)
-    # print(f"Queues: TNT={len(tnt_queue)}, Superchat TNT={len(tnt_superchat_queue)}, Fast/Slow={len(fast_slow_queue)}, Big={len(big_queue)}, Pickaxe={len(pickaxe_queue)}, MegaTNT={len(mega_tnt_queue)}")
+async def poll_youtube_subscribers():
+    """Poll subscriber count for new subscribers."""
+    global subscribers
+    try:
+        if subscribers is not None and config["CHANNEL_ID"]:
+            new_subscribers = get_subscriber_count(config["CHANNEL_ID"])
+            if new_subscribers is not None and new_subscribers > subscribers:
+                with chat_lock:
+                    mega_tnt_queue.append("New Subscriber")
+                    subscribers = new_subscribers
+                    print(
+                        f"[SUBS] New subscriber detected! Total: {subscribers}")
+    except Exception as e:
+        print(f"[ERROR] Subscriber polling failed: {e}")
+
 
 def start_event_loop(loop):
     asyncio.set_event_loop(loop)
     loop.run_forever()
 
+
 # Create a new event loop
 asyncio_loop = asyncio.new_event_loop()
 # Start it in a daemon thread so it doesn’t block shutdown
-threading.Thread(target=start_event_loop, args=(asyncio_loop,), daemon=True).start()
+threading.Thread(target=start_event_loop, args=(
+    asyncio_loop,), daemon=True).start()
+
 
 def game():
     window_width = int(INTERNAL_WIDTH / 2)
@@ -198,7 +244,8 @@ def game():
     screen = pygame.display.set_mode(screen_size, pygame.RESIZABLE)
     pygame.display.set_caption("Falling Pickaxe")
     # set icon
-    icon = pygame.image.load(Path(__file__).parent.parent / "src/assets/pickaxe" / "diamond_pickaxe.png")
+    icon = pygame.image.load(
+        Path(__file__).parent.parent / "src/assets/pickaxe" / "diamond_pickaxe.png")
     pygame.display.set_icon(icon)
 
     # Create an internal surface with fixed resolution
@@ -211,54 +258,75 @@ def game():
     # Load background
     background_image = pygame.image.load(assets_dir / "background.png")
     background_scale_factor = 1.5
-    background_width = int(background_image.get_width() * background_scale_factor)
-    background_height = int(background_image.get_height() * background_scale_factor)
-    background_image = pygame.transform.scale(background_image, (background_width, background_height))
+    background_width = int(background_image.get_width()
+                           * background_scale_factor)
+    background_height = int(background_image.get_height()
+                            * background_scale_factor)
+    background_image = pygame.transform.scale(
+        background_image, (background_width, background_height))
 
     # Scale the entire texture atlas
     texture_atlas = pygame.transform.scale(texture_atlas,
-                                        (texture_atlas.get_width() * BLOCK_SCALE_FACTOR,
-                                        texture_atlas.get_height() * BLOCK_SCALE_FACTOR))
+                                           (texture_atlas.get_width() * BLOCK_SCALE_FACTOR,
+                                            texture_atlas.get_height() * BLOCK_SCALE_FACTOR))
 
     for category in atlas_items:
         for item in atlas_items[category]:
             x, y, w, h = atlas_items[category][item]
-            atlas_items[category][item] = (x * BLOCK_SCALE_FACTOR, y * BLOCK_SCALE_FACTOR, w * BLOCK_SCALE_FACTOR, h * BLOCK_SCALE_FACTOR)
+            atlas_items[category][item] = (
+                x * BLOCK_SCALE_FACTOR, y * BLOCK_SCALE_FACTOR, w * BLOCK_SCALE_FACTOR, h * BLOCK_SCALE_FACTOR)
 
-    #sounds
+    # sounds
     sound_manager = SoundManager()
 
     sound_manager.load_sound("tnt", assets_dir / "sounds" / "tnt.mp3", 0.3)
-    sound_manager.load_sound("stone1", assets_dir / "sounds" / "stone1.wav", 0.5)
-    sound_manager.load_sound("stone2", assets_dir / "sounds" / "stone2.wav", 0.5)
-    sound_manager.load_sound("stone3", assets_dir / "sounds" / "stone3.wav", 0.5)
-    sound_manager.load_sound("stone4", assets_dir / "sounds" / "stone4.wav", 0.5)
-    sound_manager.load_sound("grass1", assets_dir / "sounds" / "grass1.wav", 0.1)
-    sound_manager.load_sound("grass2", assets_dir / "sounds" / "grass2.wav", 0.1)
-    sound_manager.load_sound("grass3", assets_dir / "sounds" / "grass3.wav", 0.1)
-    sound_manager.load_sound("grass4", assets_dir / "sounds" / "grass4.wav", 0.1)
+    sound_manager.load_sound("stone1", assets_dir /
+                             "sounds" / "stone1.wav", 0.5)
+    sound_manager.load_sound("stone2", assets_dir /
+                             "sounds" / "stone2.wav", 0.5)
+    sound_manager.load_sound("stone3", assets_dir /
+                             "sounds" / "stone3.wav", 0.5)
+    sound_manager.load_sound("stone4", assets_dir /
+                             "sounds" / "stone4.wav", 0.5)
+    sound_manager.load_sound("grass1", assets_dir /
+                             "sounds" / "grass1.wav", 0.1)
+    sound_manager.load_sound("grass2", assets_dir /
+                             "sounds" / "grass2.wav", 0.1)
+    sound_manager.load_sound("grass3", assets_dir /
+                             "sounds" / "grass3.wav", 0.1)
+    sound_manager.load_sound("grass4", assets_dir /
+                             "sounds" / "grass4.wav", 0.1)
 
     # Pickaxe
-    pickaxe = Pickaxe(space, INTERNAL_WIDTH // 2, INTERNAL_HEIGHT // 2, texture_atlas.subsurface(atlas_items["pickaxe"]["wooden_pickaxe"]), sound_manager)
+    pickaxe = Pickaxe(space, INTERNAL_WIDTH // 2, INTERNAL_HEIGHT // 2,
+                      texture_atlas.subsurface(atlas_items["pickaxe"]["wooden_pickaxe"]), sound_manager)
 
     # TNT
     last_tnt_spawn = pygame.time.get_ticks()
-    tnt_spawn_interval = 1000 * random.uniform(config["TNT_SPAWN_INTERVAL_SECONDS_MIN"], config["TNT_SPAWN_INTERVAL_SECONDS_MAX"])
+    tnt_spawn_interval = 1000 * \
+        random.uniform(config["TNT_SPAWN_INTERVAL_SECONDS_MIN"],
+                       config["TNT_SPAWN_INTERVAL_SECONDS_MAX"])
     tnt_list = []  # List to keep track of spawned TNT objects
 
     # Random Pickaxe
     last_random_pickaxe = pygame.time.get_ticks()
-    random_pickaxe_interval = 1000 * random.uniform(config["RANDOM_PICKAXE_INTERVAL_SECONDS_MIN"], config["RANDOM_PICKAXE_INTERVAL_SECONDS_MAX"])
+    random_pickaxe_interval = 1000 * \
+        random.uniform(config["RANDOM_PICKAXE_INTERVAL_SECONDS_MIN"],
+                       config["RANDOM_PICKAXE_INTERVAL_SECONDS_MAX"])
 
     # Pickaxe enlargement
     last_enlarge = pygame.time.get_ticks()
-    enlarge_interval = 1000 * random.uniform(config["PICKAXE_ENLARGE_INTERVAL_SECONDS_MIN"], config["PICKAXE_ENLARGE_INTERVAL_SECONDS_MAX"])
+    enlarge_interval = 1000 * \
+        random.uniform(config["PICKAXE_ENLARGE_INTERVAL_SECONDS_MIN"],
+                       config["PICKAXE_ENLARGE_INTERVAL_SECONDS_MAX"])
     enlarge_duration = 1000 * config["PICKAXE_ENLARGE_DURATION_SECONDS"]
 
     # Fast slow
     fast_slow_active = False
     fast_slow = random.choice(["Fast", "Slow"])
-    fast_slow_interval = 1000 * random.uniform(config["FAST_SLOW_INTERVAL_SECONDS_MIN"], config["FAST_SLOW_INTERVAL_SECONDS_MAX"])
+    fast_slow_interval = 1000 * \
+        random.uniform(config["FAST_SLOW_INTERVAL_SECONDS_MIN"],
+                       config["FAST_SLOW_INTERVAL_SECONDS_MAX"])
     last_fast_slow = pygame.time.get_ticks()
 
     # Camera
@@ -273,6 +341,10 @@ def game():
     # Youtube
     yt_poll_interval = 1000 * config["YT_POLL_INTERVAL_SECONDS"]
     last_yt_poll = pygame.time.get_ticks()
+
+    # Subscriber polling (less frequent - 5 minutes default)
+    sub_poll_interval = 1000 * config.get("SUB_POLL_INTERVAL_SECONDS", 300)
+    last_sub_poll = pygame.time.get_ticks()
 
     # Save progress interval
     save_progress_interval = 1000 * config["SAVE_PROGRESS_INTERVAL_SECONDS"]
@@ -301,7 +373,8 @@ def game():
                     new_height = int(new_width * (16 / 9))
 
                 window_width, window_height = new_width, new_height
-                screen = pygame.display.set_mode((window_width, window_height), pygame.RESIZABLE)
+                screen = pygame.display.set_mode(
+                    (window_width, window_height), pygame.RESIZABLE)
 
         # ++++++++++++++++++  UPDATE ++++++++++++++++++
         # Determine which chunks are visible
@@ -315,8 +388,10 @@ def game():
 
         space.step(step_speed)
 
-        start_chunk_y = int(pickaxe.body.position.y // (CHUNK_HEIGHT * BLOCK_SIZE) - 1) - 1
-        end_chunk_y = int(pickaxe.body.position.y + INTERNAL_HEIGHT) // (CHUNK_HEIGHT * BLOCK_SIZE)  + 1
+        start_chunk_y = int(pickaxe.body.position.y //
+                            (CHUNK_HEIGHT * BLOCK_SIZE) - 1) - 1
+        end_chunk_y = int(pickaxe.body.position.y +
+                          INTERNAL_HEIGHT) // (CHUNK_HEIGHT * BLOCK_SIZE) + 1
 
         # Update pickaxe
         pickaxe.update()
@@ -329,32 +404,39 @@ def game():
         screen.fill((0, 0, 0))
 
         # Fill internal surface with the background
-        internal_surface.blit(background_image, ((INTERNAL_WIDTH - background_width) // 2, (INTERNAL_HEIGHT - background_height) // 2))
+        internal_surface.blit(background_image, ((
+            INTERNAL_WIDTH - background_width) // 2, (INTERNAL_HEIGHT - background_height) // 2))
 
         # Check if it's time to spawn a new TNT (regular random spawn)
         current_time = pygame.time.get_ticks()
         if (not config["CHAT_CONTROL"] or (not tnt_queue and not tnt_superchat_queue and not mega_tnt_queue)) and current_time - last_tnt_spawn >= tnt_spawn_interval:
-             # Example: spawn TNT at position (400, 300) with a given texture
-             new_tnt = Tnt(space, pickaxe.body.position.x, pickaxe.body.position.y - 100,
-               texture_atlas, atlas_items, sound_manager)
-             tnt_list.append(new_tnt)
-             last_tnt_spawn = current_time
-             # New random interval for the next TNT spawn
-             tnt_spawn_interval = 1000 * random.uniform(config["TNT_SPAWN_INTERVAL_SECONDS_MIN"], config["TNT_SPAWN_INTERVAL_SECONDS_MAX"])
+            # Example: spawn TNT at position (400, 300) with a given texture
+            new_tnt = Tnt(space, pickaxe.body.position.x, pickaxe.body.position.y - 100,
+                          texture_atlas, atlas_items, sound_manager)
+            tnt_list.append(new_tnt)
+            last_tnt_spawn = current_time
+            # New random interval for the next TNT spawn
+            tnt_spawn_interval = 1000 * \
+                random.uniform(config["TNT_SPAWN_INTERVAL_SECONDS_MIN"],
+                               config["TNT_SPAWN_INTERVAL_SECONDS_MAX"])
 
         # Check if it's time to change the pickaxe (random)
         if (not config["CHAT_CONTROL"] or not pickaxe_queue) and current_time - last_random_pickaxe >= random_pickaxe_interval:
             pickaxe.random_pickaxe(texture_atlas, atlas_items)
             last_random_pickaxe = current_time
             # New random interval for the next pickaxe change
-            random_pickaxe_interval = 1000 * random.uniform(config["RANDOM_PICKAXE_INTERVAL_SECONDS_MIN"], config["RANDOM_PICKAXE_INTERVAL_SECONDS_MAX"])
+            random_pickaxe_interval = 1000 * \
+                random.uniform(config["RANDOM_PICKAXE_INTERVAL_SECONDS_MIN"],
+                               config["RANDOM_PICKAXE_INTERVAL_SECONDS_MAX"])
 
         # Check if it's time for pickaxe enlargement (random)
         if (not config["CHAT_CONTROL"] or not big_queue) and current_time - last_enlarge >= enlarge_interval:
             pickaxe.enlarge(enlarge_duration)
             last_enlarge = current_time + enlarge_duration
             # New random interval for the next enlargement
-            enlarge_interval = 1000 * random.uniform(config["PICKAXE_ENLARGE_INTERVAL_SECONDS_MIN"], config["PICKAXE_ENLARGE_INTERVAL_SECONDS_MAX"])
+            enlarge_interval = 1000 * \
+                random.uniform(config["PICKAXE_ENLARGE_INTERVAL_SECONDS_MIN"],
+                               config["PICKAXE_ENLARGE_INTERVAL_SECONDS_MAX"])
 
         # Check if it's time to change speed (random)
         if (not config["CHAT_CONTROL"] or not fast_slow_queue) and current_time - last_fast_slow >= fast_slow_interval and not fast_slow_active:
@@ -364,7 +446,9 @@ def game():
             fast_slow_active = True
             last_fast_slow = current_time
             # New random interval for the next fast/slow spawn
-            fast_slow_interval = 1000 * random.uniform(config["FAST_SLOW_INTERVAL_SECONDS_MIN"], config["FAST_SLOW_INTERVAL_SECONDS_MAX"])
+            fast_slow_interval = 1000 * \
+                random.uniform(config["FAST_SLOW_INTERVAL_SECONDS_MIN"],
+                               config["FAST_SLOW_INTERVAL_SECONDS_MAX"])
         elif current_time - last_fast_slow >= (1000 * config["FAST_SLOW_DURATION_SECONDS"]) and fast_slow_active:
             fast_slow_active = False
             last_fast_slow = current_time
@@ -373,68 +457,81 @@ def game():
         for tnt in tnt_list:
             tnt.update(tnt_list, explosions, camera)
 
-        # Poll Yotutube api
+        # Poll YouTube Chat (fast poll - every 15s)
         if live_chat_id is not None and current_time - last_yt_poll >= yt_poll_interval:
-            print("Polling YouTube API...")
             last_yt_poll = current_time
-            asyncio.run_coroutine_threadsafe(handle_youtube_poll(), asyncio_loop)
+            asyncio.run_coroutine_threadsafe(poll_youtube_chat(), asyncio_loop)
 
-        # Process chat queues
+        # Poll YouTube Subscribers (slow poll - every 5 minutes)
+        if live_chat_id is not None and current_time - last_sub_poll >= sub_poll_interval:
+            last_sub_poll = current_time
+            asyncio.run_coroutine_threadsafe(
+                poll_youtube_subscribers(), asyncio_loop)
+
+        # Process chat queues (use lock to prevent race conditions)
         if config["CHAT_CONTROL"] and current_time - last_queues_pop >= queues_pop_interval:
             last_queues_pop = current_time
 
-            # Handle regular TNT from chat command
-            if tnt_queue:
-                author = tnt_queue.pop(0)
-                print(f"Spawning regular TNT for {author} (from chat command)")
-                new_tnt = Tnt(space, pickaxe.body.position.x, pickaxe.body.position.y - 100,
-                             texture_atlas, atlas_items, sound_manager, owner_name=author)
-                tnt_list.append(new_tnt)
-                last_tnt_spawn = current_time
-
-            # Handle MegaTNT (New Subscriber)
-            if mega_tnt_queue:
-                author = mega_tnt_queue.pop(0)
-                print(f"Spawning MegaTNT for {author} (New Subscriber)")
-                new_megatnt = MegaTnt(space, pickaxe.body.position.x, pickaxe.body.position.y - 100,
-                      texture_atlas, atlas_items, sound_manager, owner_name=author)
-                tnt_list.append(new_megatnt)
-                last_tnt_spawn = current_time
-
-            # Handle Superchat/Supersticker TNT
-            if tnt_superchat_queue:
-                author, text = tnt_superchat_queue.pop(0)
-                print(f"Spawning TNT for {author} (Superchat: {text})")
-                last_tnt_spawn = current_time
-                for _ in range(config["TNT_AMOUNT_ON_SUPERCHAT"]):
-                    new_tnt = Tnt(space, pickaxe.body.position.x, pickaxe.body.position.y - 100, texture_atlas, atlas_items, sound_manager, owner_name=author)
+            with chat_lock:
+                # Handle regular TNT from chat command
+                if tnt_queue:
+                    author = tnt_queue.pop(0)
+                    print(
+                        f"Spawning regular TNT for {author} (from chat command)")
+                    new_tnt = Tnt(space, pickaxe.body.position.x, pickaxe.body.position.y - 100,
+                                  texture_atlas, atlas_items, sound_manager, owner_name=author)
                     tnt_list.append(new_tnt)
+                    last_tnt_spawn = current_time
 
-            # Handle Fast/Slow command
-            if fast_slow_queue:
-                author, q_fast_slow = fast_slow_queue.pop(0)
-                print(f"Changing speed for {author} to {q_fast_slow}")
-                fast_slow_active = True
-                last_fast_slow = current_time
-                fast_slow = q_fast_slow
-                fast_slow_interval = 1000 * random.uniform(config["FAST_SLOW_INTERVAL_SECONDS_MIN"], config["FAST_SLOW_INTERVAL_SECONDS_MAX"])
+                # Handle MegaTNT (New Subscriber)
+                if mega_tnt_queue:
+                    author = mega_tnt_queue.pop(0)
+                    print(f"Spawning MegaTNT for {author} (New Subscriber)")
+                    new_megatnt = MegaTnt(space, pickaxe.body.position.x, pickaxe.body.position.y - 100,
+                                          texture_atlas, atlas_items, sound_manager, owner_name=author)
+                    tnt_list.append(new_megatnt)
+                    last_tnt_spawn = current_time
 
-            # Handle Big pickaxe command
-            if big_queue:
-                author = big_queue.pop(0)
-                print(f"Making pickaxe big for {author}")
-                pickaxe.enlarge(enlarge_duration)
-                last_enlarge = current_time + enlarge_duration
-                enlarge_interval = 1000 * random.uniform(config["PICKAXE_ENLARGE_INTERVAL_SECONDS_MIN"], config["PICKAXE_ENLARGE_INTERVAL_SECONDS_MAX"])
+                # Handle Superchat/Supersticker TNT
+                if tnt_superchat_queue:
+                    author, text = tnt_superchat_queue.pop(0)
+                    print(f"Spawning TNT for {author} (Superchat: {text})")
+                    last_tnt_spawn = current_time
+                    for _ in range(config["TNT_AMOUNT_ON_SUPERCHAT"]):
+                        new_tnt = Tnt(space, pickaxe.body.position.x, pickaxe.body.position.y -
+                                      100, texture_atlas, atlas_items, sound_manager, owner_name=author)
+                        tnt_list.append(new_tnt)
 
-            # Handle Pickaxe type command
-            if pickaxe_queue:
-                author, pickaxe_type = pickaxe_queue.pop(0)
-                print(f"Changing pickaxe for {author} to {pickaxe_type}")
-                pickaxe.pickaxe(pickaxe_type, texture_atlas, atlas_items)
-                last_random_pickaxe = current_time
-                random_pickaxe_interval = 1000 * random.uniform(config["RANDOM_PICKAXE_INTERVAL_SECONDS_MIN"], config["RANDOM_PICKAXE_INTERVAL_SECONDS_MAX"])
+                # Handle Fast/Slow command
+                if fast_slow_queue:
+                    author, q_fast_slow = fast_slow_queue.pop(0)
+                    print(f"Changing speed for {author} to {q_fast_slow}")
+                    fast_slow_active = True
+                    last_fast_slow = current_time
+                    fast_slow = q_fast_slow
+                    fast_slow_interval = 1000 * \
+                        random.uniform(
+                            config["FAST_SLOW_INTERVAL_SECONDS_MIN"], config["FAST_SLOW_INTERVAL_SECONDS_MAX"])
 
+                # Handle Big pickaxe command
+                if big_queue:
+                    author = big_queue.pop(0)
+                    print(f"Making pickaxe big for {author}")
+                    pickaxe.enlarge(enlarge_duration)
+                    last_enlarge = current_time + enlarge_duration
+                    enlarge_interval = 1000 * \
+                        random.uniform(config["PICKAXE_ENLARGE_INTERVAL_SECONDS_MIN"],
+                                       config["PICKAXE_ENLARGE_INTERVAL_SECONDS_MAX"])
+
+                # Handle Pickaxe type command
+                if pickaxe_queue:
+                    author, pickaxe_type = pickaxe_queue.pop(0)
+                    print(f"Changing pickaxe for {author} to {pickaxe_type}")
+                    pickaxe.pickaxe(pickaxe_type, texture_atlas, atlas_items)
+                    last_random_pickaxe = current_time
+                    random_pickaxe_interval = 1000 * \
+                        random.uniform(config["RANDOM_PICKAXE_INTERVAL_SECONDS_MIN"],
+                                       config["RANDOM_PICKAXE_INTERVAL_SECONDS_MAX"])
 
         # Delete chunks
         clean_chunks(start_chunk_y)
@@ -444,7 +541,8 @@ def game():
             for chunk_y in range(start_chunk_y, end_chunk_y):
                 for y in range(CHUNK_HEIGHT):
                     for x in range(CHUNK_WIDTH):
-                        block = get_block(chunk_x, chunk_y, x, y, texture_atlas, atlas_items, space)
+                        block = get_block(chunk_x, chunk_y, x,
+                                          y, texture_atlas, atlas_items, space)
 
                         if block == None:
                             continue
@@ -468,10 +566,12 @@ def game():
         explosions = [e for e in explosions if e.particles]
 
         # Draw HUD
-        hud.draw(internal_surface, pickaxe.body.position.y, fast_slow_active, fast_slow)
+        hud.draw(internal_surface, pickaxe.body.position.y,
+                 fast_slow_active, fast_slow)
 
         # Scale internal surface to fit the resized window
-        scaled_surface = pygame.transform.smoothscale(internal_surface, (window_width, window_height))
+        scaled_surface = pygame.transform.smoothscale(
+            internal_surface, (window_width, window_height))
         screen.blit(scaled_surface, (0, 0))
 
         # Save progress
@@ -505,11 +605,13 @@ def game():
         if keys[pygame.K_t]:
             if not key_t_pressed:  # Only spawn if the key was not pressed in the previous frame
                 new_tnt = Tnt(space, pickaxe.body.position.x, pickaxe.body.position.y - 100,
-                            texture_atlas, atlas_items, sound_manager)
+                              texture_atlas, atlas_items, sound_manager)
                 tnt_list.append(new_tnt)
                 last_tnt_spawn = current_time
                 # New random interval for the next TNT spawn
-                tnt_spawn_interval = 1000 * random.uniform(config["TNT_SPAWN_INTERVAL_SECONDS_MIN"], config["TNT_SPAWN_INTERVAL_SECONDS_MAX"])
+                tnt_spawn_interval = 1000 * \
+                    random.uniform(
+                        config["TNT_SPAWN_INTERVAL_SECONDS_MIN"], config["TNT_SPAWN_INTERVAL_SECONDS_MAX"])
             key_t_pressed = True
         else:
             key_t_pressed = False  # Reset the flag when the key is released
@@ -518,11 +620,13 @@ def game():
         if keys[pygame.K_m]:
             if not key_m_pressed:  # Only spawn if the key was not pressed in the previous frame
                 new_megatnt = MegaTnt(space, pickaxe.body.position.x, pickaxe.body.position.y - 100,
-                                    texture_atlas, atlas_items, sound_manager)
+                                      texture_atlas, atlas_items, sound_manager)
                 tnt_list.append(new_megatnt)
                 last_tnt_spawn = current_time
                 # New random interval for the next TNT spawn
-                tnt_spawn_interval = 1000 * random.uniform(config["TNT_SPAWN_INTERVAL_SECONDS_MIN"], config["TNT_SPAWN_INTERVAL_SECONDS_MAX"])
+                tnt_spawn_interval = 1000 * \
+                    random.uniform(
+                        config["TNT_SPAWN_INTERVAL_SECONDS_MIN"], config["TNT_SPAWN_INTERVAL_SECONDS_MAX"])
             key_m_pressed = True
         else:
             key_m_pressed = False  # Reset the flag when the key is released
@@ -537,5 +641,6 @@ def game():
     else:
         import sys
         sys.exit(1)  # Abnormal exit - game crashed or error
+
 
 game()

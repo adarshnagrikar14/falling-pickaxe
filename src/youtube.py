@@ -42,13 +42,26 @@ def get_authenticated_service():
 
     return build('youtube', 'v3', credentials=creds)
 
-# Initialize YouTube API client
-youtube = get_authenticated_service()
+# Initialize YouTube API client - Will be set on first use
+youtube = None
+
+def ensure_youtube_service():
+    """Ensure YouTube service is initialized and return it."""
+    global youtube
+    if youtube is None:
+        try:
+            youtube = get_authenticated_service()
+            print("[YOUTUBE] ✓ Successfully initialized YouTube API service")
+        except Exception as e:
+            print(f"[YOUTUBE] ✗ Failed to initialize YouTube API: {e}")
+            raise
+    return youtube
 
 def get_my_channel_id():
     """Get the channel ID of the authenticated user"""
     try:
-        request = youtube.channels().list(
+        service = ensure_youtube_service()
+        request = service.channels().list(
             part="id",
             mine=True
         )
@@ -56,7 +69,7 @@ def get_my_channel_id():
         if response['items']:
             return response['items'][0]['id']
     except Exception as e:
-        print(f"Error getting my channel ID: {e}")
+        print(f"[YOUTUBE] Error getting my channel ID: {e}")
     return None
 
 def validate_live_stream_id(input_string):
@@ -99,9 +112,10 @@ def find_active_stream(channel_id):
     if not channel_id:
         return None
         
-    print(f"Finding live stream for channel {channel_id}...")
+    print(f"[YOUTUBE] Finding live stream for channel {channel_id}...")
     try:
-        request = youtube.search().list(
+        service = ensure_youtube_service()
+        request = service.search().list(
             part='id,snippet',
             channelId=channel_id,
             eventType='live',
@@ -115,32 +129,38 @@ def find_active_stream(channel_id):
         
         return response['items'][0]['id']['videoId']
     except Exception as e:
-        print(f"Error finding active stream: {e}")
+        print(f"[YOUTUBE] Error finding active stream: {e}")
         return None
 
 # This consumes a lot of quota (100 units per call)
 def get_live_streams(channel_id):
     """Retrieve all currently live streams for a given channel with their titles"""
-    request = youtube.search().list(
-        part="id,snippet",  # Include snippet to get titles
-        channelId=channel_id,
-        eventType="live",  # Only get currently live videos
-        type="video"
-    )
-    response = request.execute()
+    try:
+        service = ensure_youtube_service()
+        request = service.search().list(
+            part="id,snippet",  # Include snippet to get titles
+            channelId=channel_id,
+            eventType="live",  # Only get currently live videos
+            type="video"
+        )
+        response = request.execute()
 
-    live_streams = []
-    for item in response.get("items", []):
-        video_id = item["id"]["videoId"]
-        title = item["snippet"]["title"]
-        live_streams.append({"video_id": video_id, "title": title})
+        live_streams = []
+        for item in response.get("items", []):
+            video_id = item["id"]["videoId"]
+            title = item["snippet"]["title"]
+            live_streams.append({"video_id": video_id, "title": title})
 
-    return live_streams
+        return live_streams
+    except Exception as e:
+        print(f"[YOUTUBE] Error getting live streams: {e}")
+        return []
 
 def get_live_stream(livestream_id):
     """Retrieve a single live stream by its ID"""
     try:
-        request = youtube.videos().list(
+        service = ensure_youtube_service()
+        request = service.videos().list(
             part="snippet,liveStreamingDetails",
             id=livestream_id
         )
@@ -151,12 +171,13 @@ def get_live_stream(livestream_id):
         else:
             return None
     except Exception as e:
-        print(f"Error getting live stream details: {e}")
+        print(f"[YOUTUBE] Error getting live stream details: {e}")
         return None
 
 def get_live_chat_id(live_stream_id):
     try:
-        response = youtube.videos().list(
+        service = ensure_youtube_service()
+        response = service.videos().list(
             part="liveStreamingDetails",
             id=live_stream_id
         ).execute()
@@ -165,19 +186,23 @@ def get_live_chat_id(live_stream_id):
         if items and "liveStreamingDetails" in items[0]:
             return items[0]["liveStreamingDetails"].get("activeLiveChatId")
     except Exception as e:
-        print(f"Error getting live chat ID: {e}")
+        print(f"[YOUTUBE] Error getting live chat ID: {e}")
     return None
 
 def get_live_chat_messages(live_chat_id):
-    response = youtube.liveChatMessages().list(
-        liveChatId=live_chat_id,
-        part="snippet,authorDetails"
-    ).execute()
+    try:
+        service = ensure_youtube_service()
+        response = service.liveChatMessages().list(
+            liveChatId=live_chat_id,
+            part="snippet,authorDetails"
+        ).execute()
 
-    for item in response["items"]:
-        author = item["authorDetails"]["displayName"]
-        message = item["snippet"]["displayMessage"]
-        print(f"{author}: {message}")
+        for item in response["items"]:
+            author = item["authorDetails"]["displayName"]
+            message = item["snippet"]["displayMessage"]
+            print(f"{author}: {message}")
+    except Exception as e:
+        print(f"[YOUTUBE] Error getting live chat messages: {e}")
 
 
 # Global set to track seen message IDs
@@ -185,12 +210,13 @@ seen_messages = set()
 def get_new_live_chat_messages(live_chat_id):
     """Fetch and print only new chat messages (including super chats and super stickers) that haven't been printed before."""
     try:
-        response = youtube.liveChatMessages().list(
+        service = ensure_youtube_service()
+        response = service.liveChatMessages().list(
             liveChatId=live_chat_id,
             part="snippet,authorDetails"
         ).execute()
     except Exception as e:
-        print(f"Error fetching messages: {e}")
+        print(f"[YOUTUBE] Error fetching messages: {e}")
         return []
 
     # Define log directory
@@ -242,7 +268,8 @@ def get_subscriber_count(channel_id):
     if not channel_id:
         return None
     try:
-        request = youtube.channels().list(
+        service = ensure_youtube_service()
+        request = service.channels().list(
             part="statistics",
             id=channel_id
         )
@@ -251,5 +278,5 @@ def get_subscriber_count(channel_id):
         if response["items"]:
             return int(response["items"][0]["statistics"]["subscriberCount"])
     except Exception as e:
-        print(f"Error getting subscriber count: {e}")
+        print(f"[YOUTUBE] Error getting subscriber count: {e}")
     return None
